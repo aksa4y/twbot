@@ -22,7 +22,7 @@ function createDispatcher({moderatorHandlers, userHandlers, clock = Date.now, co
 
         const mod = Object.hasOwn(aliases.mod, inputCommand) ? aliases.mod[inputCommand] : null;
         if (mod && Object.hasOwn(moderatorHandlers, mod)) {
-            if (canExecute('moderator', permissions)) await moderatorHandlers[mod](channel, args, username);
+            if (canExecute('moderator', permissions)) await moderatorHandlers[mod](channel, args, username, {tags, command:inputCommand});
             return;
         }
         const command = Object.hasOwn(aliases.user, inputCommand) ? aliases.user[inputCommand] : null;

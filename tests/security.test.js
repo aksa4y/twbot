@@ -74,7 +74,7 @@ test('API authenticates, validates body and executes third warning timeout',asyn
  const {createApp}=require('../src/api/server');const server=createApp(null).listen(0,'127.0.0.1');
  await new Promise(resolve=>server.once('listening',resolve));
  const url=`http://127.0.0.1:${server.address().port}`;
- const previous=api.timeoutUser;let timeouts=0;api.timeoutUser=async()=>{timeouts++;};
+ const previous=api.timeoutUser;let timeouts=0;api.timeoutUser=async()=>{timeouts++;return {confirmation:'confirmed',httpStatus:200,endpoint:'moderation/bans'};};
  try {
   assert.equal((await fetch(url+'/stats/top?type=points')).status,401);
   for(let i=0;i<3;i++)assert.equal((await fetch(url+'/command/warn',{method:'POST',headers:{'x-api-key':process.env.API_KEY,'content-type':'application/json'},body:JSON.stringify({username:'warnuser'})})).status,200);
@@ -151,7 +151,7 @@ test('dispatcher preserves arguments, aliases and special cooldowns',async()=>{
 test('link deletion and ignored events never dispatch commands',async()=>{
  const events=[];
  const {createAutoModeration}=require('../src/chat/automoderation');
- const moderate=createAutoModeration({mode:'active',client:{},send:async()=>events.push('send'),journal:{recordAutoModerationEvent:async()=>1,finishAutoModerationEvent:async()=>{}},twitchApi:{deleteMessage:async()=>events.push('delete')}});
+ const moderate=createAutoModeration({mode:'active',client:{},send:async()=>events.push('send'),journal:{recordAutoModerationEvent:async()=>1,finishAutoModerationEvent:async()=>{}},twitchApi:{deleteMessage:async()=>{events.push('delete');return {confirmation:'confirmed',httpStatus:204,endpoint:'moderation/chat'};}}});
  const handle=createMessageHandler({moderate,dispatch:async()=>events.push('dispatch')});
  await handle('#streamer',{username:'viewer',id:'message'},'!тест example.com',false);
  assert.deepEqual(events,['delete','send']);
@@ -183,7 +183,7 @@ test('runtime wires modules to the client without starting a connection on impor
 test('extracted automoderation applies punishment before deleting the offending message',async()=>{
  const {createAutoModeration}=require('../src/chat/automoderation');
  const events=[];
- const moderate=createAutoModeration({mode:'active',journal:{recordAutoModerationEvent:async()=>1,finishAutoModerationEvent:async()=>{}},client:{},send:async()=>events.push('send'),moderation:{hasForbiddenWords:()=>true,getTimeoutDuration:()=>600,handleTimeout:async()=>events.push('timeout')},twitchApi:{deleteMessage:async()=>events.push('delete')}});
+ const moderate=createAutoModeration({mode:'active',journal:{recordAutoModerationEvent:async()=>1,finishAutoModerationEvent:async()=>{}},client:{},send:async()=>events.push('send'),moderation:{hasForbiddenWords:()=>true,getTimeoutDuration:()=>600,handleTimeout:async()=>events.push('timeout')},twitchApi:{deleteMessage:async()=>{events.push('delete');return {confirmation:'confirmed',httpStatus:204,endpoint:'moderation/chat'};}}});
  assert.equal(await moderate('#streamer',{id:'message'},'нарушение','viewer'),true);
  assert.deepEqual(events,['timeout','delete']);
 });
@@ -249,7 +249,7 @@ test('observation journals all automatic rules without deletes, timeouts or chat
  ];
  for(const [index,item] of cases.entries()){
   const effects=[];
-  const moderate=createAutoModeration({mode:'observe',client:{},logger:{info:()=>{}},send:async()=>effects.push('send'),twitchApi:{deleteMessage:async()=>effects.push('delete')},moderation:{
+  const moderate=createAutoModeration({mode:'observe',client:{},logger:{info:()=>{}},send:async()=>effects.push('send'),twitchApi:{deleteMessage:async()=>{effects.push('delete');return {confirmation:'confirmed',httpStatus:204,endpoint:'moderation/chat'};}},moderation:{
    hasForbiddenWords:()=>!!item.forbidden,getTimeoutDuration:()=>600,
    checkCaps:()=>item.caps,checkSpam:async()=>item.spam,
    handleTimeout:async()=>effects.push('timeout')
@@ -279,7 +279,7 @@ test('journal failure prevents all side effects in both modes',async()=>{
  const {createModerationActions}=require('../src/chat/moderation-actions');
  for(const mode of ['observe','active']){
   const effects=[];
-  const apply=createModerationActions({mode,client:{},send:async()=>effects.push('send'),twitchApi:{deleteMessage:async()=>effects.push('delete')},journal:{recordAutoModerationEvent:async()=>{throw new Error('disk failure');}}});
+  const apply=createModerationActions({mode,client:{},send:async()=>effects.push('send'),twitchApi:{deleteMessage:async()=>{effects.push('delete');return {confirmation:'confirmed',httpStatus:204,endpoint:'moderation/chat'};}},journal:{recordAutoModerationEvent:async()=>{throw new Error('disk failure');}}});
   await assert.rejects(apply({channel:'#streamer',tags:{username:'viewer'},message:'example.com',rule:'link',actions:[{type:'delete'}]}));
   assert.deepEqual(effects,[]);
  }
@@ -295,7 +295,7 @@ test('invalid mode cannot silently enable automatic punishment',()=>{
 test('active mode records successful actions and leaves historical observation entries untouched',async()=>{
  const {createAutoModeration}=require('../src/chat/automoderation');
  const effects=[];const user='activeloguser';
- const moderate=createAutoModeration({mode:'active',client:{},send:async()=>effects.push('send'),twitchApi:{deleteMessage:async()=>effects.push('delete')}});
+ const moderate=createAutoModeration({mode:'active',client:{},send:async()=>effects.push('send'),twitchApi:{deleteMessage:async()=>{effects.push('delete');return {confirmation:'confirmed',httpStatus:204,endpoint:'moderation/chat'};}}});
  await moderate('#streamer',{username:user,id:'active-message'},'example.com',user);
  assert.deepEqual(effects,['delete','send']);
  const [event]=await database.getAutoModerationEvents({username:user});
@@ -309,4 +309,129 @@ test('journal CLI reads persisted messages and safely escapes terminal control c
  const output=execFileSync(process.execPath,[path.resolve(__dirname,'../scripts/moderation-log.js'),'--user','cliloguser','--limit','1'],{env:process.env,encoding:'utf8'});
  assert.equal(output.includes('\u001b'),false);
  const [event]=JSON.parse(output);assert.equal(event.username,'cliloguser');assert.equal(event.message,'\u001b[31mexample.com');
+});
+function mockTwitch(mode = 'success') {
+ const original = global.fetch;
+ const calls = [];
+ global.fetch = async (url, options = {}) => {
+  if (!String(url).startsWith('https://api.twitch.tv/')) return original(url,options);
+  const parsed = new URL(url);
+  if (parsed.pathname.endsWith('/users')) {
+   if (mode === 'lookup_error') return {ok:false,status:403};
+   return {ok:true,status:200,json:async()=>({data:[{id:`id_${parsed.searchParams.get('login')}`}]})};
+  }
+  calls.push({url:String(url),method:options.method,body:options.body});
+  if (mode === 'network') throw new Error('SECRET_TOKEN_IN_NETWORK_ERROR');
+  if (typeof mode === 'number') return {ok:false,status:mode};
+  return {ok:true,status:options.method === 'DELETE' ? 204 : 200};
+ };
+ return {calls,restore:()=>{global.fetch=original;}};
+}
+test('chat moderation audit records authenticated actor, target, reason and Twitch receipt',async()=>{
+ const mock=mockTwitch();
+ try {
+  const {createModeratorHandlers}=require('../src/commands/moderator-handlers');
+  const {getPermissions}=require('../src/chat/permissions');
+  const sent=[];
+  const dispatch=createDispatcher({moderatorHandlers:createModeratorHandlers({client:{},send:async(c,text)=>sent.push(text)}),userHandlers:{}});
+  const tags={username:'auditmod',mod:true,'user-id':'1234',id:'command-id'};
+  await dispatch({channel:'#streamer',tags,message:'!таймаут @auditvictim 60 повтор сообщений',permissions:getPermissions(tags)});
+  const [row]=await database.getModerationActions({target:'auditvictim'});
+  assert.equal(row.actor,'auditmod');assert.equal(row.actor_id,'1234');assert.equal(row.request_id,'command-id');
+  assert.equal(row.source,'chat');assert.equal(row.action,'timeout');assert.equal(row.reason,'повтор сообщений');assert.equal(row.duration,60);
+  assert.equal(row.confirmation,'confirmed');assert.equal(row.status,'confirmed');assert.equal(row.http_status,200);
+  assert.equal(mock.calls.length,1);assert.equal(sent.length,1);
+ }finally{mock.restore();}
+});
+test('API audit never trusts a caller-supplied moderator identity',async()=>{
+ const mock=mockTwitch();
+ const {createApp}=require('../src/api/server');const server=createApp(null).listen(0,'127.0.0.1');
+ await new Promise(resolve=>server.once('listening',resolve));
+ try {
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/command/ban`,{method:'POST',headers:{'x-api-key':process.env.API_KEY,'content-type':'application/json'},body:JSON.stringify({username:'apivictim',reason:'спам',actor:'fake_moderator'})});
+  assert.equal(response.status,200);
+  const [row]=await database.getModerationActions({target:'apivictim'});
+  assert.equal(row.source,'api');assert.equal(row.actor,'api_key');assert.equal(row.reason,'спам');assert.equal(row.status,'confirmed');
+ }finally{mock.restore();await new Promise(resolve=>server.close(resolve));}
+});
+test('rejection, ambiguous server response, network failure and lookup failure stay distinct',async()=>{
+ for(const [index,mode,confirmation,status] of [
+  [0,403,'rejected','rejected'],[1,429,'rejected','rejected'],
+  [2,503,'unknown','unknown'],[3,'network','unknown','unknown'],
+  [4,'lookup_error','not_sent','failed']
+ ]){
+  const mock=mockTwitch(mode);const user=`auditfailure${index}`;
+  try {
+   await assert.rejects(moderation.handleTimeout({},'#streamer',user,60,'причина',{source:'chat',actor:'auditmod'}),error=>error.confirmation===confirmation);
+   const [row]=await database.getModerationActions({target:user});
+   assert.equal(row.confirmation,confirmation);assert.equal(row.status,status);
+   assert.equal(JSON.stringify(row).includes('SECRET_TOKEN'),false);
+   assert.equal(mock.calls.length,mode==='lookup_error'?0:1);
+  }finally{mock.restore();}
+ }
+});
+test('confirmed remote ban is not misreported as rejected after local bookkeeping failure',async()=>{
+ const mock=mockTwitch();const original=database.createBan;
+ database.createBan=async()=>{throw new Error('disk full');};
+ try {
+  await assert.rejects(moderation.handleBan({},'#streamer','localfailure','причина',{source:'chat',actor:'auditmod'}),error=>error.confirmation==='confirmed');
+  const [row]=await database.getModerationActions({target:'localfailure'});
+  assert.equal(row.status,'local_error');assert.equal(row.confirmation,'confirmed');assert.equal(row.http_status,200);
+  assert.equal(mock.calls.length,1);
+ }finally{database.createBan=original;mock.restore();}
+});
+test('local warnings and the resulting Twitch timeout are linked in the journal',async()=>{
+ const mock=mockTwitch();
+ try {
+  const {createModeratorHandlers}=require('../src/commands/moderator-handlers');
+  const handlers=createModeratorHandlers({client:{},send:async()=>{}});
+  for(let i=0;i<3;i++)await handlers.warn('#streamer',['@auditwarn','грубость'],'auditmod',{tags:{'user-id':'1234',id:`warn-${i}`}});
+  const rows=await database.getModerationActions({target:'auditwarn'});
+  const timeout=rows.find(row=>row.action==='timeout');const warns=rows.filter(row=>row.action==='warn');
+  assert.equal(warns.length,3);assert.ok(warns.every(row=>row.status==='local' && row.confirmation==='not_applicable' && row.reason==='грубость'));
+  assert.equal(timeout.status,'confirmed');assert.equal(timeout.parent_id,warns[0].id);assert.equal(timeout.actor,'auditmod');
+  assert.equal(mock.calls.length,1);
+ }finally{mock.restore();}
+});
+test('automatic actions link to decisions; observation never creates executed-action entries',async()=>{
+ const mock=mockTwitch();
+ try {
+  const {createAutoModeration}=require('../src/chat/automoderation');
+  const moderate=createAutoModeration({mode:'active',client:{},send:async()=>{}});
+  await moderate('#streamer',{username:'auditauto',id:'auto-message'},'example.com','auditauto');
+  const rows=await database.getModerationActions({target:'auditauto'});
+  const row=rows.find(entry=>entry.action==='delete');
+  assert.equal(rows.find(entry=>entry.action==='warning').confirmation,'not_applicable');
+  const [decision]=await database.getAutoModerationEvents({username:'auditauto'});
+  assert.equal(row.source,'automod');assert.equal(row.actor,'system');assert.equal(row.action,'delete');assert.equal(row.confirmation,'confirmed');assert.equal(row.decision_id,decision.id);
+  assert.deepEqual(await database.getModerationActions({target:'observeuser0'}),[]);
+ }finally{mock.restore();}
+});
+test('audit persistence failure blocks the mutation request',async()=>{
+ const {runAuditedAction}=require('../src/services/action-audit');let calls=0;
+ await assert.rejects(runAuditedAction({action:'ban',channel:'#streamer',target:'blocked',journal:{recordModerationAction:async()=>{throw new Error('disk full');}},remote:async()=>{calls++;}}));
+ assert.equal(calls,0);
+});
+test('unfinished actions remain unknown and action journal is readable after restart',async()=>{
+ const id=await database.recordModerationAction({source:'chat',actor:'auditmod',channel:'#streamer',action:'ban',target:'pendingaudit',reason:'проверка'});
+ const {execFileSync}=require('node:child_process');
+ const output=execFileSync(process.execPath,[path.resolve(__dirname,'../scripts/actions-log.js'),'--user','pendingaudit'],{env:process.env,encoding:'utf8'});
+ const [row]=JSON.parse(output);assert.equal(row.id,id);assert.equal(row.status,'pending');assert.equal(row.confirmation,'unknown');
+});
+test('chat does not announce success when Twitch outcome is unknown',async()=>{
+ const mock=mockTwitch(503);const sent=[];
+ try {
+  const {createModeratorHandlers}=require('../src/commands/moderator-handlers');
+  const handlers=createModeratorHandlers({client:{},send:async(channel,text)=>sent.push(text),logger:{error:()=>{}}});
+  await handlers.timeout('#streamer',['@ambiguouschat','60','спам'],'auditmod',{tags:{id:'unknown-chat'}});
+  assert.equal(sent.length,1);assert.match(sent[0],/Результат Twitch неизвестен/);assert.equal(sent[0].includes('Выдан таймаут'),false);
+ }finally{mock.restore();}
+});
+test('invalid moderation arguments are logged without sending a Twitch mutation',async()=>{
+ const mock=mockTwitch();
+ try {
+  await assert.rejects(moderation.handleTimeout({},'#streamer','@InvalidDuration',0,'некорректная длительность',{source:'chat',actor:'AUDITMOD'}));
+  const [row]=await database.getModerationActions({target:'invalidduration'});
+  assert.equal(row.actor,'auditmod');assert.equal(row.target,'invalidduration');assert.equal(row.status,'failed');assert.equal(row.confirmation,'not_sent');assert.equal(mock.calls.length,0);
+ }finally{mock.restore();}
 });

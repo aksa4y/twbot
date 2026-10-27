@@ -32,15 +32,16 @@ function createApp(client) {
   res.json({username:name,iq,points,warns});
  }));
  app.post('/command/:command',route(async(req,res)=>{
-  const name=username(req.body.username);const channel=process.env.CHANNEL_NAME;
+  const name=String(req.body.username || '');const channel=process.env.CHANNEL_NAME;
+  const audit={source:'api',actor:'api_key',command:req.params.command,channel};
   const reason=String(req.body.reason || 'Нарушение правил').slice(0,500);
   switch(req.params.command) {
-   case 'ban': await moderation.handleBan(client,channel,name,reason); break;
-   case 'unban': await moderation.handleUnban(client,channel,name); break;
-   case 'timeout': await moderation.handleTimeout(client,channel,name,amount(req.body.duration,1209600),reason); break;
+   case 'ban': await moderation.handleBan(client,channel,name,reason,audit); break;
+   case 'unban': await moderation.handleUnban(client,channel,name,{...audit,reason}); break;
+   case 'timeout': await moderation.handleTimeout(client,channel,name,req.body.duration,reason,audit); break;
    case 'warn': {
-    const result=await moderation.handleWarn(name);
-    if(result.type==='timeout') await moderation.handleTimeout(client,channel,name,result.duration,result.reason);
+    const result=await moderation.handleWarn(name,reason,audit);
+    if(result.type==='timeout') await moderation.handleTimeout(client,channel,name,result.duration,result.reason,{...audit,parentId:result.auditId});
     return res.json({success:true,result});
    }
    default:return res.status(404).json({error:'Неизвестная команда'});
@@ -53,7 +54,7 @@ function createApp(client) {
  app.use((err,req,res,next)=>{
   if(res.headersSent) return next(err);
   const status=err.type==='entity.too.large'?413:err instanceof SyntaxError?400:500;
-  res.status(status).json({error:status===500?'Не удалось выполнить запрос':'Некорректное тело запроса'});
+  res.status(status).json({error:status===500?'Не удалось выполнить запрос':'Некорректное тело запроса',...(err.auditId ? {auditId:err.auditId,confirmation:err.confirmation,httpStatus:err.httpStatus} : {})});
  });
  return app;
 }

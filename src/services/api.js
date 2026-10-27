@@ -1,14 +1,24 @@
 const { username, amount, limitedMap } = require('../utils/security');
 const cache = limitedMap(2000, 3600000);
-async function request(endpoint, query = {}, method = 'GET', data) {
+async function request(endpoint, query = {}, method = 'GET', data, receipt = false) {
  const url = new URL(`https://api.twitch.tv/helix/${endpoint}`);
  for (const [k,v] of Object.entries(query)) url.searchParams.set(k, v);
- const response = await fetch(url, {
+ let response;
+ try {response = await fetch(url, {
   method, signal: AbortSignal.timeout(8000),
   headers: {'Client-ID': process.env.CLIENT_ID, Authorization: `Bearer ${process.env.ACCESS_TOKEN}`, 'Content-Type': 'application/json'},
   ...(data ? {body: JSON.stringify(data)} : {})
- });
- if (!response.ok) throw new Error(`Twitch API ${endpoint}: HTTP ${response.status}`);
+ });} catch {
+  const error = new Error(`Twitch API ${endpoint}: network failure`);
+  Object.assign(error,{confirmation:method === 'GET' ? 'not_sent' : 'unknown',endpoint,errorKind:'network'});
+  throw error;
+ }
+ if (!response.ok) {
+  const error = new Error(`Twitch API ${endpoint}: HTTP ${response.status}`);
+  Object.assign(error,{confirmation:method === 'GET' ? 'not_sent' : response.status >= 500 || response.status === 408 ? 'unknown' : 'rejected',httpStatus:response.status,endpoint,errorKind:'http'});
+  throw error;
+ }
+ if (receipt) return {confirmation:'confirmed',httpStatus:response.status,endpoint};
  return response.status === 204 ? null : response.json();
 }
 async function getUserId(name) {
@@ -28,16 +38,16 @@ async function ids(channel, target) {
 async function timeoutUser(channel, target, duration, reason) {
  duration = amount(duration, 1209600);
  const {user_id, ...query} = await ids(channel, target);
- await request('moderation/bans', query, 'POST', {data:{user_id, duration, reason: String(reason || '').slice(0,500)}});
+ return request('moderation/bans', query, 'POST', {data:{user_id, duration, reason: String(reason || '').slice(0,500)}},true);
 }
 async function banUser(channel, target, reason) {
  const {user_id, ...query} = await ids(channel, target);
- await request('moderation/bans', query, 'POST', {data:{user_id, reason:String(reason || '').slice(0,500)}});
+ return request('moderation/bans', query, 'POST', {data:{user_id, reason:String(reason || '').slice(0,500)}},true);
 }
-async function unbanUser(channel, target) {await request('moderation/bans', await ids(channel,target), 'DELETE');}
+async function unbanUser(channel, target) {return request('moderation/bans', await ids(channel,target), 'DELETE',undefined,true);}
 async function deleteMessage(channel, message_id) {
  if (!/^[a-zA-Z0-9-]{1,100}$/.test(message_id || '')) throw new Error('Нет корректного ID сообщения');
- await request('moderation/chat', {...await ids(channel), message_id}, 'DELETE');
+ return request('moderation/chat', {...await ids(channel), message_id}, 'DELETE',undefined,true);
 }
 async function validateToken() {
  const response = await fetch('https://id.twitch.tv/oauth2/validate', {headers:{Authorization:`OAuth ${process.env.ACCESS_TOKEN}`}, signal:AbortSignal.timeout(8000)});

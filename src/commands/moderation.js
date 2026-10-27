@@ -1,5 +1,6 @@
 const { forbiddenWords, wordTimeoutMap } = require('./bannedWords');
 const api = require('../services/api');
+const {runAuditedAction} = require('../services/action-audit');
 const database = require('../services/database');
 const { normalize, username, amount, limitedMap } = require('../utils/security');
 const spamCache = limitedMap();
@@ -35,19 +36,23 @@ function target(name) {
  if (name === process.env.BOT_USERNAME || name === process.env.CHANNEL_NAME) throw new Error('Нельзя применять наказание к боту или владельцу канала');
  return name;
 }
-async function handleTimeout(client, channel, name, duration, reason) {await api.timeoutUser(channel,target(name),amount(duration,1209600),reason);}
-async function handleBan(client, channel, name, reason) {
- name = target(name);
- await api.banUser(channel,name,reason);
- await database.createBan(name,reason);
+async function handleTimeout(client, channel, name, duration, reason, context = {}) {
+ return runAuditedAction({action:'timeout',channel,target:name,duration:Number(duration),reason,context,
+  remote:()=>api.timeoutUser(channel,target(name),amount(duration,1209600),reason)});
 }
-async function handleUnban(client, channel, name) {
- name = username(name); await api.unbanUser(channel,name); await database.unbanUser(name);
- return `@${name} разбанен.`;
+async function handleBan(client, channel, name, reason, context = {}) {
+ return runAuditedAction({action:'ban',channel,target:name,reason,context,
+  remote:()=>api.banUser(channel,target(name),reason),
+  local:()=>database.createBan(username(name),reason)});
 }
-async function handleWarn(name) {
- name = target(name);
- const count = await database.recordWarn(name);
- return count >= 3 ? {type:'timeout', duration:600,reason:'Три предупреждения за 24 часа'} : {type:'message',text:`@${name}, предупреждение ${count}/3.`};
+async function handleUnban(client, channel, name, context = {}) {
+ await runAuditedAction({action:'unban',channel,target:name,reason:context.reason || 'Снятие бана',context,
+  remote:()=>api.unbanUser(channel,username(name)),local:()=>database.unbanUser(username(name))});
+ return `@${username(name)} разбанен.`;
+}
+async function handleWarn(name, reason = 'Предупреждение модератора', context = {}) {
+ const {result:count,auditId} = await runAuditedAction({action:'warn',channel:context.channel || process.env.CHANNEL_NAME,target:name,reason,context,
+  local:()=>database.recordWarn(target(name),reason)});
+ return count >= 3 ? {type:'timeout', duration:600,reason:'Три предупреждения за 24 часа',auditId} : {type:'message',text:`@${username(name)}, предупреждение ${count}/3. Причина: ${reason}`,auditId};
 }
 module.exports = {hasForbiddenWords,getTimeoutDuration,checkCaps,checkSpam,handleTimeout,handleBan,handleUnban,handleWarn};

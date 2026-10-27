@@ -28,6 +28,18 @@ db.serialize(() => {
     db.run('PRAGMA journal_mode=WAL');
     db.run('PRAGMA busy_timeout=5000');
     db.run('PRAGMA foreign_keys=ON');
+    db.run(`CREATE TABLE IF NOT EXISTS moderation_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at INTEGER NOT NULL, finished_at INTEGER,
+        source TEXT NOT NULL, actor TEXT NOT NULL, actor_id TEXT,
+        channel TEXT NOT NULL, command TEXT, request_id TEXT,
+        action TEXT NOT NULL, target TEXT NOT NULL, reason TEXT NOT NULL,
+        duration INTEGER, parent_id INTEGER, decision_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        confirmation TEXT NOT NULL DEFAULT 'unknown',
+        http_status INTEGER, endpoint TEXT, error_kind TEXT
+    )`);
+    db.run('CREATE INDEX IF NOT EXISTS moderation_actions_date ON moderation_actions(created_at)');
     db.run(`CREATE TABLE IF NOT EXISTS automoderation_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at INTEGER NOT NULL,
@@ -401,10 +413,10 @@ async function settleDuel(id, winner) {
   run("UPDATE duels SET status='completed' WHERE id=?",[id]);
  });
 }
-async function recordWarn(name) {
+async function recordWarn(name, reason = 'Предупреждение модератора') {
  return transaction((run,get)=>{
   const count=get("SELECT COUNT(*) AS n FROM violations WHERE username=? AND type='warn' AND created_at>datetime('now','-1 day')",[name]);
-  run("INSERT INTO violations(username,type,reason) VALUES (?,'warn','Предупреждение модератора')",[name]);
+  run("INSERT INTO violations(username,type,reason) VALUES (?,'warn',?)",[name,reason]);
   return count.n%3+1;
  });
 }
@@ -716,9 +728,45 @@ function getAutoModerationEvents({limit = 20, username, mode} = {}) {
  return new Promise((resolve,reject) => db.all(sql,params,(err,rows)=>err ? reject(err) : resolve(rows.map(row=>({...row,actions:JSON.parse(row.actions)})))));
 }
 
+
+function auditName(value) {
+ try {return validUser(value);} catch {return String(value || '').replace(/[\x00-\x1f\x7f]/g,' ').slice(0,100);}
+}
+function recordModerationAction(event) {
+ const sources = ['chat','api','automod','system'];
+ if (!sources.includes(event.source) || !['ban','unban','timeout','warn','delete','warning'].includes(event.action)) throw new Error('Некорректное действие журнала');
+ const text = (value, max) => String(value || '').replace(/[\x00-\x1f\x7f]/g,' ').slice(0,max);
+ const number = value => Number.isSafeInteger(value) && value>0 ? value : null;
+ const now = Date.now();
+ return transaction((run) => {
+  run('DELETE FROM moderation_actions WHERE created_at<?',[now-30*24*60*60*1000]);
+  const result = run(`INSERT INTO moderation_actions(created_at,source,actor,actor_id,channel,command,request_id,action,target,reason,duration,parent_id,decision_id)
+   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,[now,event.source,auditName(event.actor),text(event.actorId,100),validUser(event.channel),text(event.command,100),text(event.requestId,100),event.action,auditName(event.target),text(event.reason,500),number(event.duration),number(event.parentId),number(event.decisionId)]);
+  run('DELETE FROM moderation_actions WHERE id NOT IN (SELECT id FROM moderation_actions ORDER BY id DESC LIMIT 10000)');
+  return result.lastID;
+ });
+}
+async function finishModerationAction(id, {status, confirmation, httpStatus, endpoint, errorKind}) {
+ if (!['confirmed','rejected','unknown','local','failed','local_error'].includes(status) || !['confirmed','rejected','unknown','not_sent','not_applicable'].includes(confirmation)) throw new Error('Некорректный результат журнала');
+ await run(`UPDATE moderation_actions SET finished_at=?,status=?,confirmation=?,http_status=?,endpoint=?,error_kind=? WHERE id=?`,[
+  Date.now(),status,confirmation,Number.isInteger(httpStatus)?httpStatus:null,String(endpoint || '').slice(0,100),String(errorKind || '').slice(0,50),id
+ ]);
+}
+function getModerationActions({limit = 20, target, actor, source, status} = {}) {
+ limit = validAmount(limit,100);
+ const filters=[];const params=[];
+ for(const [column,value] of Object.entries({target,actor,source,status})) {
+  if (value !== undefined) {filters.push(`${column}=?`);params.push(['actor','target'].includes(column) ? auditName(value) : String(value).slice(0,100));}
+ }
+ params.push(limit);
+ const sql=`SELECT * FROM moderation_actions ${filters.length?'WHERE '+filters.join(' AND '):''} ORDER BY id DESC LIMIT ?`;
+ return new Promise((resolve,reject)=>db.all(sql,params,(err,rows)=>err?reject(err):resolve(rows)));
+}
+
 const ready = new Promise((resolve,reject) => db.get('SELECT 1 FROM unban_requests LIMIT 1', err => err ? reject(err) : resolve()));
 async function close() {await new Promise((resolve,reject)=>db.close(err=>err?reject(err):resolve()));}
 module.exports = {
+    recordModerationAction, finishModerationAction, getModerationActions,
     recordAutoModerationEvent, finishAutoModerationEvent, getAutoModerationEvents,
     ready, close, transferPoints, settleDuel, recordWarn, getPendingReports, claimCooldown, clearCooldownScope, awardActivityPoints,
     getUserIQ,
