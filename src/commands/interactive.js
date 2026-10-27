@@ -16,7 +16,8 @@ const {
     formatTimeDiffExact,
 } = require('../utils/utils');
 const axios = require('../services/http');
-const NodeCache = require('node-cache');
+const {createCooldownStore, channelScope} = require('../services/cooldowns');
+const cooldowns = createCooldownStore();
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../config/.env') });
 
@@ -25,8 +26,7 @@ const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const CHANNEL_NAME = process.env.CHANNEL_NAME;
 const BACKUP_CHANNEL_CREATION_DATE = process.env.BACKUP_CHANNEL_CREATION_DATE;
 
-const giftBanCache = new NodeCache({ stdTTL: 60, maxKeys: 10000 });
-const giftReceivedCache = new NodeCache({ stdTTL: 60 * 60 * 12, maxKeys: 10000 });
+
 
 const textGifts = [                     //Замени своими
     'сегодня без подарка Chel ',
@@ -274,8 +274,7 @@ function addGift(giftName, username, isBroadcaster, isMod) {
 }
 
 async function handleGift(username) {
- if (giftReceivedCache.has(username)) return `@${username}, подарок уже получен.`;
- giftReceivedCache.set(username,true);
+ if (!cooldowns.claim(channelScope('gift'), username, 12*60*60*1000, Date.now())) return `@${username}, подарок уже получен.`;
  const gift=textGifts[Math.floor(Math.random()*textGifts.length)];
  await points.awardActivityPoints(username);
  return `@${username}, ${gift}`;
@@ -285,15 +284,13 @@ function handleResetGift(username, isBroadcaster) {
     if (!isBroadcaster) {
         return `@${username} нее, только стример так может`;
     }
-    giftReceivedCache.flushAll();
-    giftBanCache.flushAll();
+    cooldowns.clear(channelScope('gift'));
     console.log(`[${new Date().toLocaleTimeString()}] Подарки сброшены ${username}`);
     return `@${username} подарки сброшены, можно получать снова!`;
 }
 
 function clearGiftCache() {
-    giftReceivedCache.flushAll();
-    giftBanCache.flushAll();
+    cooldowns.clear(channelScope('gift'));
     console.log('Кэш подарков очищен');
 }
 

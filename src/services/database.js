@@ -28,6 +28,13 @@ db.serialize(() => {
     db.run('PRAGMA journal_mode=WAL');
     db.run('PRAGMA busy_timeout=5000');
     db.run('PRAGMA foreign_keys=ON');
+    db.run(`CREATE TABLE IF NOT EXISTS cooldowns (
+        scope TEXT NOT NULL,
+        username TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY(scope, username)
+    )`);
+    db.run('CREATE INDEX IF NOT EXISTS cooldowns_expiration ON cooldowns(expires_at)');
     db.run(`CREATE TABLE IF NOT EXISTS user_iq (
         username TEXT PRIMARY KEY,
         iq INTEGER,
@@ -626,10 +633,48 @@ function updateDuelStatus(duelId, status) {
     });
 }
 
+
+let nextCooldownCleanup = 0;
+function validateCooldown(scope, name, duration, now) {
+ if (typeof scope !== 'string' || !/^[a-z0-9:_#-]{1,128}$/.test(scope)) throw new Error('Некорректная область кулдауна');
+ name = validUser(name);
+ if (!Number.isSafeInteger(duration) || duration < 1 || duration > 7*24*60*60*1000 ||
+     !Number.isSafeInteger(now) || now < 0 || !Number.isSafeInteger(now+duration)) throw new Error('Некорректное время кулдауна');
+ return name;
+}
+function claimCooldownStatement(scope, name, duration, now) {
+ return connection.prepare(`INSERT INTO cooldowns(scope,username,expires_at) VALUES (?,?,?)
+ ON CONFLICT(scope,username) DO UPDATE SET expires_at=excluded.expires_at
+ WHERE cooldowns.expires_at<=?`).run(scope,name,now+duration,now).changes > 0;
+}
+function claimCooldown(scope, name, duration, now = Date.now()) {
+ name = validateCooldown(scope,name,duration,now);
+ if (now >= nextCooldownCleanup) {
+  connection.prepare('DELETE FROM cooldowns WHERE expires_at<=?').run(now);
+  nextCooldownCleanup = now+300000;
+ }
+ return claimCooldownStatement(scope,name,duration,now);
+}
+function clearCooldownScope(scope) {
+ // Validate before deleting; the placeholder nickname is not stored.
+ validateCooldown(scope,'validation',1,0);
+ connection.prepare('DELETE FROM cooldowns WHERE scope=?').run(scope);
+}
+async function awardActivityPoints(name, scope, now = Date.now()) {
+ name = validateCooldown(scope,name,300000,now);
+ return transaction((run) => {
+  if (!claimCooldownStatement(scope,name,300000,now)) return false;
+  const result = run(`INSERT INTO bot_points(username,points) VALUES (?,1)
+   ON CONFLICT(username) DO UPDATE SET points=points+1,last_seen=CURRENT_TIMESTAMP WHERE points<?`,[name,MAX_BALANCE]);
+  if (!result.changes) throw new Error('Достигнут предел баланса');
+  return true;
+ });
+}
+
 const ready = new Promise((resolve,reject) => db.get('SELECT 1 FROM unban_requests LIMIT 1', err => err ? reject(err) : resolve()));
 async function close() {await new Promise((resolve,reject)=>db.close(err=>err?reject(err):resolve()));}
 module.exports = {
-    ready, close, transferPoints, settleDuel, recordWarn, getPendingReports,
+    ready, close, transferPoints, settleDuel, recordWarn, getPendingReports, claimCooldown, clearCooldownScope, awardActivityPoints,
     getUserIQ,
     updateUserIQ,
     getStreamSession,

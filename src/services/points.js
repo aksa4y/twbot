@@ -1,13 +1,8 @@
 const database = require('./database');
 
-const lastPointsTime = require('../utils/security').limitedMap();
-
+const {channelScope} = require('./cooldowns');
 async function awardActivityPoints(username) {
-    const now = Date.now();
-    const last = lastPointsTime.get(username) || 0;
-    if (now - last < 5 * 60 * 1000) return;
-    lastPointsTime.set(username, now);
-    await database.addUserPoints(username, 1);
+    return database.awardActivityPoints(username, channelScope('activity'));
 }
 
 async function getPoints(username) {

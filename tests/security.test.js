@@ -128,11 +128,11 @@ test('role policy covers moderator and owner-only commands',async()=>{
   [{mod:true,badges:{}},true,false],
   [{badges:{broadcaster:'1'}},true,true]
  ];
- for(const [tags,mayModerate,mayOwn] of cases){
+ for(const [index,[tags,mayModerate,mayOwn]] of cases.entries()){
   let now=100000;const invoked=[];
   const dispatch=createDispatcher({clock:()=>now,moderatorHandlers:{ban:async()=>invoked.push('ban')},userHandlers:{addpoints:async()=>invoked.push('points'),test:async()=>invoked.push('test')}});
   for(const message of ['!бан @target','!+очки @target 1','!тест текст']){
-   await dispatch({channel:'#streamer',tags:{...tags,username:'roleuser'},message,permissions:getPermissions(tags)});now+=3001;
+   await dispatch({channel:'#streamer',tags:{...tags,username:`roleuser${index}`},message,permissions:getPermissions(tags)});now+=3001;
   }
   assert.deepEqual(invoked,[...(mayModerate?['ban','points']:[]),...(mayOwn?['test']:[])]);
  }
@@ -183,4 +183,54 @@ test('extracted automoderation applies punishment before deleting the offending 
  const moderate=createAutoModeration({client:{},send:async()=>events.push('send'),moderation:{hasForbiddenWords:()=>true,getTimeoutDuration:()=>600,handleTimeout:async()=>events.push('timeout')},twitchApi:{deleteMessage:async()=>events.push('delete')}});
  assert.equal(await moderate('#streamer',{id:'message'},'нарушение','viewer'),true);
  assert.deepEqual(events,['timeout','delete']);
+});
+test('cooldowns survive actual process restarts and expire at their original deadlines',()=>{
+ const {execFileSync}=require('node:child_process');
+ const dbModule=path.resolve(__dirname,'../src/services/database.js');
+ const script=`
+  const db=require(${JSON.stringify(dbModule)});
+  const now=Number(process.argv[1]);
+  db.ready.then(async()=>{
+   const durations={commands:3000,roulette:300000,report:60000,gift:43200000};
+   const result={};
+   for(const [key,duration] of Object.entries(durations)) result[key]=db.claimCooldown('channel:streamer:'+key,'restartuser',duration,now);
+   result.activity=await db.awardActivityPoints('restartuser','channel:streamer:activity',now);
+   result.balance=await db.getUserPoints('restartuser');
+   await db.close();console.log(JSON.stringify(result));
+  }).catch(()=>process.exit(1));`;
+ const run=now=>JSON.parse(execFileSync(process.execPath,['-e',script,String(now)],{env:{...process.env,DATABASE_FILE:path.join(dir,'restart.db')},encoding:'utf8'}));
+ assert.deepEqual(run(1000000),{commands:true,roulette:true,report:true,gift:true,activity:true,balance:1});
+ assert.deepEqual(run(1001000),{commands:false,roulette:false,report:false,gift:false,activity:false,balance:1});
+ assert.deepEqual(run(1300000),{commands:true,roulette:true,report:true,gift:false,activity:true,balance:2});
+ assert.equal(run(44200000).gift,true);
+});
+test('recreated dispatcher honors saved cooldown and channel isolation',async()=>{
+ const {getPermissions}=require('../src/chat/permissions');
+ let now=1000000;let calls=0;
+ const make=()=>createDispatcher({clock:()=>now,moderatorHandlers:{},userHandlers:{roulette:async()=>{calls++;}}});
+ const ctx={channel:'#streamer',tags:{username:'dispatchrestart'},message:'!рулетка',permissions:getPermissions({})};
+ await make()(ctx);assert.equal(calls,1);
+ now+=4000;await make()(ctx);assert.equal(calls,1);
+ await make()({...ctx,channel:'#otherchannel'});assert.equal(calls,2);
+ now=1300000;await make()(ctx);assert.equal(calls,3);
+});
+test('gift reset clears persisted gift restrictions without resetting other cooldowns',()=>{
+ const user='giftreset';const now=2000000;
+ assert.equal(database.claimCooldown('channel:streamer:gift',user,43200000,now),true);
+ assert.equal(database.claimCooldown('channel:streamer:roulette',user,300000,now),true);
+ database.clearCooldownScope('channel:streamer:gift');
+ assert.equal(database.claimCooldown('channel:streamer:gift',user,43200000,now+1),true);
+ assert.equal(database.claimCooldown('channel:streamer:roulette',user,300000,now+1),false);
+});
+test('parallel activity awards issue one point and failed award rolls back its cooldown',async()=>{
+ const scope='channel:streamer:activity';const now=3000000;
+ const result=await Promise.all([database.awardActivityPoints('activityuser',scope,now),database.awardActivityPoints('activityuser',scope,now)]);
+ assert.equal(result.filter(Boolean).length,1);assert.equal(await database.getUserPoints('activityuser'),1);
+ await database.addUserPoints('cappedactivity',1);
+ const connection=new (require('node:sqlite').DatabaseSync)(process.env.DATABASE_FILE);
+ connection.prepare('UPDATE bot_points SET points=1000000000 WHERE username=?').run('cappedactivity');
+ await assert.rejects(database.awardActivityPoints('cappedactivity',scope,now));
+ connection.prepare('UPDATE bot_points SET points=0 WHERE username=?').run('cappedactivity');connection.close();
+ assert.equal(await database.awardActivityPoints('cappedactivity',scope,now),true);
+ assert.equal(await database.getUserPoints('cappedactivity'),1);
 });

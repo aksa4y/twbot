@@ -1,5 +1,5 @@
 const aliases = require('./aliases');
-const {limitedMap} = require('../utils/security');
+const {createCooldownStore, channelScope} = require('../services/cooldowns');
 const {canExecute} = require('../chat/permissions');
 // Every command needs an explicit policy; a newly added handler is denied until registered.
 const USER_ROLES = Object.freeze({
@@ -12,17 +12,13 @@ const USER_ROLES = Object.freeze({
     addgift:'moderator', addpoints:'moderator', resetgift:'broadcaster', test:'broadcaster'
 });
 const COOLDOWNS = Object.freeze({report:60000, roulette:300000});
-function createDispatcher({moderatorHandlers, userHandlers, clock = Date.now}) {
-    const commandTimes = limitedMap();
-    const specialTimes = limitedMap(10000, 3600000);
+function createDispatcher({moderatorHandlers, userHandlers, clock = Date.now, cooldowns = createCooldownStore()}) {
     return async function dispatch({channel, tags, message, permissions}) {
         const [rawCommand, ...args] = message.slice(1).trim().split(/\s+/);
         const inputCommand = rawCommand.toLowerCase();
         const username = tags.username;
         const now = clock();
-        const last = commandTimes.get(username);
-        if (last !== undefined && now-last < 3000) return;
-        commandTimes.set(username, now);
+        if (!cooldowns.claim(channelScope('commands', channel), username, 3000, now)) return;
 
         const mod = Object.hasOwn(aliases.mod, inputCommand) ? aliases.mod[inputCommand] : null;
         if (mod && Object.hasOwn(moderatorHandlers, mod)) {
@@ -35,10 +31,7 @@ function createDispatcher({moderatorHandlers, userHandlers, clock = Date.now}) {
         const requiredRole = USER_ROLES[command];
         if (!canExecute(requiredRole, permissions)) return;
         if (Object.hasOwn(COOLDOWNS, command)) {
-            const key = `${command}:${username}`;
-            const previous = specialTimes.get(key);
-            if (previous !== undefined && now-previous < COOLDOWNS[command]) return;
-            specialTimes.set(key, now);
+            if (!cooldowns.claim(channelScope(command, channel), username, COOLDOWNS[command], now)) return;
         }
         await userHandlers[command](channel, args, username, tags, permissions.isBroadcaster, permissions.isMod);
     };
