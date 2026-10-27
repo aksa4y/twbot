@@ -28,6 +28,7 @@ db.serialize(() => {
     db.run('PRAGMA journal_mode=WAL');
     db.run('PRAGMA busy_timeout=5000');
     db.run('PRAGMA foreign_keys=ON');
+    db.run('CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     db.run(`CREATE TABLE IF NOT EXISTS moderation_actions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at INTEGER NOT NULL, finished_at INTEGER,
@@ -763,9 +764,22 @@ function getModerationActions({limit = 20, target, actor, source, status} = {}) 
  return new Promise((resolve,reject)=>db.all(sql,params,(err,rows)=>err?reject(err):resolve(rows)));
 }
 
+
+function getSetting(key) {return connection.prepare('SELECT value FROM bot_settings WHERE key=?').get(key)?.value;}
+function setSetting(key,value) {connection.prepare('INSERT INTO bot_settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key,value);}
+function getPanelSummary() {
+ const since=Date.now()-24*60*60*1000;
+ return {
+  actions:connection.prepare('SELECT COUNT(*) AS n FROM moderation_actions WHERE created_at>=?').get(since).n,
+  observations:connection.prepare("SELECT COUNT(*) AS n FROM automoderation_events WHERE created_at>=? AND mode='observe'").get(since).n,
+  uncertain:connection.prepare("SELECT COUNT(*) AS n FROM moderation_actions WHERE created_at>=? AND status IN ('unknown','pending')").get(since).n
+ };
+}
+
 const ready = new Promise((resolve,reject) => db.get('SELECT 1 FROM unban_requests LIMIT 1', err => err ? reject(err) : resolve()));
 async function close() {await new Promise((resolve,reject)=>db.close(err=>err?reject(err):resolve()));}
 module.exports = {
+    getSetting, setSetting, getPanelSummary,
     recordModerationAction, finishModerationAction, getModerationActions,
     recordAutoModerationEvent, finishAutoModerationEvent, getAutoModerationEvents,
     ready, close, transferPoints, settleDuel, recordWarn, getPendingReports, claimCooldown, clearCooldownScope, awardActivityPoints,

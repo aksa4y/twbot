@@ -36,7 +36,8 @@ class TwitchBot {
         };
 
         this.client = client || new tmi.Client(this.config);
-        this.autoModerationMode = getAutoModerationMode();
+        this.autoModerationMode = require('../services/database').getSetting('automod_mode') || getAutoModerationMode();
+        this.startedAt = Date.now();
         this.apiServer = null;
         this.send = createSender({client:this.client});
         const duelManager = new DuelManager(this.client, this.send);
@@ -46,11 +47,25 @@ class TwitchBot {
         });
         this.handleMessage = createMessageHandler({
             send:this.send,
-            moderate:createAutoModeration({client:this.client, send:this.send, mode:this.autoModerationMode}),
+            moderate:createAutoModeration({client:this.client, send:this.send, mode:() => this.autoModerationMode}),
             dispatch:dispatcher,
             isStopping:() => this.stopping
         });
         this.setupEventHandlers();
+    }
+
+    getStatus() {
+        return {channel:process.env.CHANNEL_NAME,bot:process.env.BOT_USERNAME,
+            connected:this.client.readyState?.() === 'OPEN',mode:this.autoModerationMode,
+            uptimeSeconds:Math.floor((Date.now()-this.startedAt)/1000),stopping:!!this.stopping};
+    }
+
+    setMode(mode) {
+        if (!['observe','active'].includes(mode)) throw new Error('Некорректный режим');
+        require('../services/database').setSetting('automod_mode',mode);
+        if (mode !== this.autoModerationMode) require('../commands/moderation').resetAutoModerationCounters();
+        this.autoModerationMode = mode;
+        return this.getStatus();
     }
 
     setupEventHandlers() {
@@ -80,7 +95,7 @@ class TwitchBot {
             this.validationTimer = setInterval(() => twitchApi.validateToken().catch(() => this.shutdown(1)), 60 * 60 * 1000);
             await this.client.connect();
             console.log('✅ Бот уже на Twitch');
-            this.apiServer = startApiServer(this.client);
+            this.apiServer = startApiServer(this.client, {getStatus:() => this.getStatus(), setMode:mode => this.setMode(mode)});
             const refresh = async () => {
                 try { const data = await twitchApi.request('streams', {user_login: process.env.CHANNEL_NAME});
                     interactive.setCurrentStreamId(data.data[0]?.id || null);

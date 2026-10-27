@@ -1,10 +1,12 @@
 const defaultModeration = require('../commands/moderation');
 const {hasLink} = require('../utils/security');
+const {getAutoModerationMode} = require('../config');
 const {createModerationActions} = require('./moderation-actions');
 function createAutoModeration({client, send, moderation = defaultModeration, ...options}) {
     const apply = createModerationActions({client, send, moderation, ...options});
     return async function moderate(channel, tags, message, username) {
-        const decide = (rule, actions) => apply({channel, tags:{...tags, username}, message, rule, actions});
+        const evaluatedMode = typeof options.mode === 'function' ? options.mode() : options.mode || getAutoModerationMode();
+        const decide = (rule, actions) => apply({channel, tags:{...tags, username}, message, rule, actions, evaluatedMode});
         if (hasLink(message)) {
             await decide('link', [
                 {type:'delete', reason:'Ссылка в сообщении'},

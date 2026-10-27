@@ -3,8 +3,9 @@ const api = require('../services/api');
 const {runAuditedAction} = require('../services/action-audit');
 const database = require('../services/database');
 const { normalize, username, amount, limitedMap } = require('../utils/security');
-const spamCache = limitedMap();
-const capsWarnCache = limitedMap();
+let spamCache = limitedMap();
+let capsWarnCache = limitedMap();
+function resetAutoModerationCounters() {spamCache=limitedMap();capsWarnCache=limitedMap();}
 function hasForbiddenWords(message) {
  const words = normalize(message).match(/[\p{L}\p{N}_]+/gu) || [];
  return forbiddenWords.some(word => normalize(word).includes(' ') ? ` ${normalize(message)} `.includes(` ${normalize(word)} `) : words.includes(normalize(word)));
@@ -55,4 +56,4 @@ async function handleWarn(name, reason = 'Предупреждение моде�
   local:()=>database.recordWarn(target(name),reason)});
  return count >= 3 ? {type:'timeout', duration:600,reason:'Три предупреждения за 24 часа',auditId} : {type:'message',text:`@${username(name)}, предупреждение ${count}/3. Причина: ${reason}`,auditId};
 }
-module.exports = {hasForbiddenWords,getTimeoutDuration,checkCaps,checkSpam,handleTimeout,handleBan,handleUnban,handleWarn};
+module.exports = {resetAutoModerationCounters,hasForbiddenWords,getTimeoutDuration,checkCaps,checkSpam,handleTimeout,handleBan,handleUnban,handleWarn};

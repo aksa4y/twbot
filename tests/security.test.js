@@ -435,3 +435,42 @@ test('invalid moderation arguments are logged without sending a Twitch mutation'
   assert.equal(row.actor,'auditmod');assert.equal(row.target,'invalidduration');assert.equal(row.status,'failed');assert.equal(row.confirmation,'not_sent');assert.equal(mock.calls.length,0);
  }finally{mock.restore();}
 });
+test('panel serves public assets but protects status, logs and settings',async()=>{
+ const {createApp}=require('../src/api/server');const server=createApp(null).listen(0,'127.0.0.1');
+ await new Promise(resolve=>server.once('listening',resolve));const base=`http://127.0.0.1:${server.address().port}`;
+ try {
+  const page=await fetch(base+'/panel');const html=await page.text();assert.equal(page.status,200);assert.match(html,/TWBot/);assert.equal(html.includes(process.env.API_KEY),false);
+  assert.match(page.headers.get('content-security-policy'),/frame-ancestors 'none'/);
+  for(const asset of ['app.js','styles.css'])assert.equal((await fetch(base+'/panel/'+asset)).status,200);
+  for(const route of ['/status','/logs/actions','/logs/observations'])assert.equal((await fetch(base+route)).status,401);
+  const headers={'x-api-key':process.env.API_KEY};
+  const status=await (await fetch(base+'/status',{headers})).json();assert.ok(status.summary);assert.equal(JSON.stringify(status).includes(process.env.API_KEY),false);
+  const log=await (await fetch(base+'/logs/actions?user=auditvictim',{headers})).json();assert.equal(log[0].target,'auditvictim');
+  assert.equal((await fetch(base+'/status',{headers:{...headers,Origin:'https://untrusted.example'}})).status,403);
+  const hostileStatus=await new Promise((resolve,reject)=>{const req=require('node:http').get(base+'/status',{headers:{...headers,Host:'untrusted.example'}},res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);});
+  assert.equal(hostileStatus,403);
+ }finally{await new Promise(resolve=>server.close(resolve));}
+});
+test('panel changes mode live, persists it and clears simulated caps counters',async()=>{
+ const {EventEmitter}=require('node:events');const {TwitchBot}=require('../src/bot');const {createApp}=require('../src/api/server');
+ const fake=()=>{const client=new EventEmitter();client.readyState=()=> 'OPEN';return client;};
+ const bot=new TwitchBot({client:fake()});bot.setMode('observe');
+ moderation.checkCaps('КАПС СООБЩЕНИЕ','switchmodeuser');moderation.checkCaps('КАПС СООБЩЕНИЕ','switchmodeuser');
+ const server=createApp(bot.client,{getStatus:()=>bot.getStatus(),setMode:mode=>bot.setMode(mode)}).listen(0,'127.0.0.1');
+ await new Promise(resolve=>server.once('listening',resolve));const url=`http://127.0.0.1:${server.address().port}/settings/automod`;
+ try {
+  assert.equal((await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:'active'})})).status,401);
+  const headers={'x-api-key':process.env.API_KEY,'content-type':'application/json'};
+  assert.equal((await fetch(url,{method:'POST',headers,body:JSON.stringify({mode:'bad'})})).status,400);
+  const result=await (await fetch(url,{method:'POST',headers,body:JSON.stringify({mode:'active'})})).json();
+  assert.equal(result.mode,'active');assert.equal(bot.getStatus().mode,'active');assert.ok(moderation.checkCaps('КАПС СООБЩЕНИЕ','switchmodeuser').warning);
+  assert.equal(new TwitchBot({client:fake()}).autoModerationMode,'active');
+  assert.equal(database.getSetting('automod_mode'),'active');
+ }finally{bot.setMode('observe');await new Promise(resolve=>server.close(resolve));}
+});
+test('a decision retains its evaluated mode if the panel switches mode while logging',async()=>{
+ const {createModerationActions}=require('../src/chat/moderation-actions');let mode='observe';const effects=[];
+ const apply=createModerationActions({client:{},send:async()=>effects.push('send'),mode:()=>mode,logger:{info:()=>{}},journal:{recordAutoModerationEvent:async event=>{mode='active';assert.equal(event.mode,'observe');return 1;}}});
+ await apply({channel:'#streamer',tags:{username:'viewer'},message:'spam',rule:'spam',actions:[{type:'warning',text:'warning'}],evaluatedMode:'observe'});
+ assert.deepEqual(effects,[]);
+});
