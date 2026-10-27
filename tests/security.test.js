@@ -149,7 +149,10 @@ test('dispatcher preserves arguments, aliases and special cooldowns',async()=>{
  assert.equal(calls.length,2);
 });
 test('link deletion and ignored events never dispatch commands',async()=>{
- const events=[];const handle=createMessageHandler({send:async()=>events.push('send'),moderate:async()=>events.push('moderate'),dispatch:async()=>events.push('dispatch'),twitchApi:{deleteMessage:async()=>events.push('delete')}});
+ const events=[];
+ const {createAutoModeration}=require('../src/chat/automoderation');
+ const moderate=createAutoModeration({mode:'active',client:{},send:async()=>events.push('send'),journal:{recordAutoModerationEvent:async()=>1,finishAutoModerationEvent:async()=>{}},twitchApi:{deleteMessage:async()=>events.push('delete')}});
+ const handle=createMessageHandler({moderate,dispatch:async()=>events.push('dispatch')});
  await handle('#streamer',{username:'viewer',id:'message'},'!тест example.com',false);
  assert.deepEqual(events,['delete','send']);
  await handle('#streamer',{username:'viewer'},'!пинг',true);
@@ -180,7 +183,7 @@ test('runtime wires modules to the client without starting a connection on impor
 test('extracted automoderation applies punishment before deleting the offending message',async()=>{
  const {createAutoModeration}=require('../src/chat/automoderation');
  const events=[];
- const moderate=createAutoModeration({client:{},send:async()=>events.push('send'),moderation:{hasForbiddenWords:()=>true,getTimeoutDuration:()=>600,handleTimeout:async()=>events.push('timeout')},twitchApi:{deleteMessage:async()=>events.push('delete')}});
+ const moderate=createAutoModeration({mode:'active',journal:{recordAutoModerationEvent:async()=>1,finishAutoModerationEvent:async()=>{}},client:{},send:async()=>events.push('send'),moderation:{hasForbiddenWords:()=>true,getTimeoutDuration:()=>600,handleTimeout:async()=>events.push('timeout')},twitchApi:{deleteMessage:async()=>events.push('delete')}});
  assert.equal(await moderate('#streamer',{id:'message'},'нарушение','viewer'),true);
  assert.deepEqual(events,['timeout','delete']);
 });
@@ -233,4 +236,77 @@ test('parallel activity awards issue one point and failed award rolls back its c
  connection.prepare('UPDATE bot_points SET points=0 WHERE username=?').run('cappedactivity');connection.close();
  assert.equal(await database.awardActivityPoints('cappedactivity',scope,now),true);
  assert.equal(await database.getUserPoints('cappedactivity'),1);
+});
+test('observation journals all automatic rules without deletes, timeouts or chat warnings',async()=>{
+ const {createAutoModeration}=require('../src/chat/automoderation');
+ const cases=[
+  {message:'example.com',rule:'link'},
+  {message:'запрещённое',rule:'forbidden_word',forbidden:true},
+  {message:'КАПС',rule:'caps',caps:{warning:'предупреждение'}},
+  {message:'КАПС',rule:'caps',caps:{timeout:true,duration:600,reason:'Капс'}},
+  {message:'повтор',rule:'spam',spam:{warning:'не повторяйте'}},
+  {message:'повтор',rule:'spam',spam:{timeout:true,duration:300,reason:'Спам'}}
+ ];
+ for(const [index,item] of cases.entries()){
+  const effects=[];
+  const moderate=createAutoModeration({mode:'observe',client:{},logger:{info:()=>{}},send:async()=>effects.push('send'),twitchApi:{deleteMessage:async()=>effects.push('delete')},moderation:{
+   hasForbiddenWords:()=>!!item.forbidden,getTimeoutDuration:()=>600,
+   checkCaps:()=>item.caps,checkSpam:async()=>item.spam,
+   handleTimeout:async()=>effects.push('timeout')
+  }});
+  const user=`observeuser${index}`;
+  assert.equal(await moderate('#streamer',{username:user,id:`message${index}`},item.message,user),true);
+  assert.deepEqual(effects,[]);
+  const [event]=await database.getAutoModerationEvents({username:user});
+  assert.equal(event.rule,item.rule);assert.equal(event.mode,'observe');assert.equal(event.status,'observed');
+  assert.equal(event.message,item.message);assert.ok(event.actions.length>0);
+ }
+});
+test('journal is durable across process restart and can be filtered',()=>{
+ const {execFileSync}=require('node:child_process');
+ const script=`const db=require(${JSON.stringify(path.resolve(__dirname,'../src/services/database.js'))});db.ready.then(async()=>{console.log(JSON.stringify(await db.getAutoModerationEvents({username:'observeuser0',mode:'observe',limit:1})));await db.close();});`;
+ const rows=JSON.parse(execFileSync(process.execPath,['-e',script],{env:process.env,encoding:'utf8'}));
+ assert.equal(rows.length,1);assert.equal(rows[0].rule,'link');assert.equal(rows[0].actions[0].type,'delete');
+});
+test('active mode persists a decision before applying it, failures are recorded',async()=>{
+ const {createModerationActions}=require('../src/chat/moderation-actions');
+ const order=[];
+ const apply=createModerationActions({mode:'active',client:{},send:async()=>{},journal:{recordAutoModerationEvent:async()=>{order.push('record');return 1;},finishAutoModerationEvent:async(id,status)=>order.push(status)},moderation:{handleTimeout:async()=>{order.push('timeout');throw new Error('API failed');}},logger:{error:()=>{}}});
+ await apply({channel:'#streamer',tags:{username:'viewer'},message:'текст',rule:'caps',actions:[{type:'timeout',duration:600,reason:'Капс'}]});
+ assert.deepEqual(order,['record','timeout','failed']);
+});
+test('journal failure prevents all side effects in both modes',async()=>{
+ const {createModerationActions}=require('../src/chat/moderation-actions');
+ for(const mode of ['observe','active']){
+  const effects=[];
+  const apply=createModerationActions({mode,client:{},send:async()=>effects.push('send'),twitchApi:{deleteMessage:async()=>effects.push('delete')},journal:{recordAutoModerationEvent:async()=>{throw new Error('disk failure');}}});
+  await assert.rejects(apply({channel:'#streamer',tags:{username:'viewer'},message:'example.com',rule:'link',actions:[{type:'delete'}]}));
+  assert.deepEqual(effects,[]);
+ }
+});
+test('invalid mode cannot silently enable automatic punishment',()=>{
+ const {getAutoModerationMode}=require('../src/config');
+ const old=process.env.AUTOMOD_MODE;
+ try {
+  delete process.env.AUTOMOD_MODE;assert.equal(getAutoModerationMode(),'observe');
+  process.env.AUTOMOD_MODE='typo';assert.throws(getAutoModerationMode);
+ }finally{if(old===undefined)delete process.env.AUTOMOD_MODE;else process.env.AUTOMOD_MODE=old;}
+});
+test('active mode records successful actions and leaves historical observation entries untouched',async()=>{
+ const {createAutoModeration}=require('../src/chat/automoderation');
+ const effects=[];const user='activeloguser';
+ const moderate=createAutoModeration({mode:'active',client:{},send:async()=>effects.push('send'),twitchApi:{deleteMessage:async()=>effects.push('delete')}});
+ await moderate('#streamer',{username:user,id:'active-message'},'example.com',user);
+ assert.deepEqual(effects,['delete','send']);
+ const [event]=await database.getAutoModerationEvents({username:user});
+ assert.equal(event.status,'applied');assert.equal(event.mode,'active');
+ const [observed]=await database.getAutoModerationEvents({username:'observeuser0'});
+ assert.equal(observed.status,'observed');
+});
+test('journal CLI reads persisted messages and safely escapes terminal control characters',async()=>{
+ await database.recordAutoModerationEvent({channel:'#streamer',username:'cliloguser',messageId:'cli',message:'\u001b[31mexample.com',rule:'link',actions:[{type:'delete'}],mode:'observe'});
+ const {execFileSync}=require('node:child_process');
+ const output=execFileSync(process.execPath,[path.resolve(__dirname,'../scripts/moderation-log.js'),'--user','cliloguser','--limit','1'],{env:process.env,encoding:'utf8'});
+ assert.equal(output.includes('\u001b'),false);
+ const [event]=JSON.parse(output);assert.equal(event.username,'cliloguser');assert.equal(event.message,'\u001b[31mexample.com');
 });

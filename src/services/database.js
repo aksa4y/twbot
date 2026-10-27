@@ -28,6 +28,19 @@ db.serialize(() => {
     db.run('PRAGMA journal_mode=WAL');
     db.run('PRAGMA busy_timeout=5000');
     db.run('PRAGMA foreign_keys=ON');
+    db.run(`CREATE TABLE IF NOT EXISTS automoderation_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at INTEGER NOT NULL,
+        channel TEXT NOT NULL,
+        username TEXT NOT NULL,
+        message_id TEXT,
+        message TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        actions TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL
+    )`);
+    db.run('CREATE INDEX IF NOT EXISTS automoderation_events_date ON automoderation_events(created_at)');
     db.run(`CREATE TABLE IF NOT EXISTS cooldowns (
         scope TEXT NOT NULL,
         username TEXT NOT NULL,
@@ -671,9 +684,42 @@ async function awardActivityPoints(name, scope, now = Date.now()) {
  });
 }
 
+
+function recordAutoModerationEvent(event) {
+ const channel = validUser(event.channel);
+ const username = validUser(event.username);
+ if (!['observe','active'].includes(event.mode) || !['link','forbidden_word','caps','spam'].includes(event.rule)) throw new Error('Некорректное событие автомодерации');
+ const now = Date.now();
+ const status = event.mode === 'observe' ? 'observed' : 'pending';
+ return transaction((run) => {
+  run('DELETE FROM automoderation_events WHERE created_at<?',[now-30*24*60*60*1000]);
+  const result = run(`INSERT INTO automoderation_events(created_at,channel,username,message_id,message,rule,actions,mode,status)
+   VALUES (?,?,?,?,?,?,?,?,?)`,[now,channel,username,String(event.messageId || '').slice(0,100),String(event.message).slice(0,2000),event.rule,JSON.stringify(event.actions),event.mode,status]);
+  run('DELETE FROM automoderation_events WHERE id NOT IN (SELECT id FROM automoderation_events ORDER BY id DESC LIMIT 10000)');
+  return result.lastID;
+ });
+}
+async function finishAutoModerationEvent(id, status) {
+ if (!['applied','failed'].includes(status)) throw new Error('Некорректный статус');
+ await run("UPDATE automoderation_events SET status=? WHERE id=? AND mode='active' AND status='pending'",[status,id]);
+}
+function getAutoModerationEvents({limit = 20, username, mode} = {}) {
+ limit = validAmount(limit,100);
+ const filters=[];const params=[];
+ if (username) {filters.push('username=?');params.push(validUser(username));}
+ if (mode) {
+  if (!['observe','active'].includes(mode)) throw new Error('Некорректный режим');
+  filters.push('mode=?');params.push(mode);
+ }
+ params.push(limit);
+ const sql = `SELECT * FROM automoderation_events ${filters.length ? 'WHERE '+filters.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`;
+ return new Promise((resolve,reject) => db.all(sql,params,(err,rows)=>err ? reject(err) : resolve(rows.map(row=>({...row,actions:JSON.parse(row.actions)})))));
+}
+
 const ready = new Promise((resolve,reject) => db.get('SELECT 1 FROM unban_requests LIMIT 1', err => err ? reject(err) : resolve()));
 async function close() {await new Promise((resolve,reject)=>db.close(err=>err?reject(err):resolve()));}
 module.exports = {
+    recordAutoModerationEvent, finishAutoModerationEvent, getAutoModerationEvents,
     ready, close, transferPoints, settleDuel, recordWarn, getPendingReports, claimCooldown, clearCooldownScope, awardActivityPoints,
     getUserIQ,
     updateUserIQ,

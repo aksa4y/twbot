@@ -1,4 +1,5 @@
 const tmi = require('tmi.js');
+const {getAutoModerationMode} = require('../config');
 const twitchApi = require('../services/api');
 const interactive = require('../commands/interactive');
 const proverbs = require('../services/proverbs');
@@ -35,6 +36,7 @@ class TwitchBot {
         };
 
         this.client = client || new tmi.Client(this.config);
+        this.autoModerationMode = getAutoModerationMode();
         this.apiServer = null;
         this.send = createSender({client:this.client});
         const duelManager = new DuelManager(this.client, this.send);
@@ -44,7 +46,7 @@ class TwitchBot {
         });
         this.handleMessage = createMessageHandler({
             send:this.send,
-            moderate:createAutoModeration({client:this.client, send:this.send}),
+            moderate:createAutoModeration({client:this.client, send:this.send, mode:this.autoModerationMode}),
             dispatch:dispatcher,
             isStopping:() => this.stopping
         });
@@ -73,6 +75,7 @@ class TwitchBot {
     async connect() {
         try {
             await require('../services/database').ready;
+            console.log(`Режим автомодерации: ${this.autoModerationMode}`);
             await twitchApi.validateToken();
             this.validationTimer = setInterval(() => twitchApi.validateToken().catch(() => this.shutdown(1)), 60 * 60 * 1000);
             await this.client.connect();
