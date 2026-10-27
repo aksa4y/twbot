@@ -9,7 +9,9 @@ const database=require('../src/services/database');
 const api=require('../src/services/api');
 const moderation=require('../src/commands/moderation');
 const {username,amount,hasLink}=require('../src/utils/security');
-const {TwitchBot}=require('../src/bot');
+const {createMessageHandler}=require('../src/chat/message-handler');
+const {createDispatcher}=require('../src/commands/dispatcher');
+const {createSender}=require('../src/chat/sender');
 before(()=>database.ready);
 after(async()=>{await database.close();fs.rmSync(dir,{recursive:true,force:true});});
 test('strict identifiers and numeric values',()=>{
@@ -48,23 +50,24 @@ test('daily claim is atomic',async()=>{
  assert.equal(claims.filter(Boolean).length,1);
 });
 test('commands and когда text always pass moderation first; VIP is exempt',async()=>{
- const bot=Object.create(TwitchBot.prototype);bot.commandTimes=require('../src/utils/security').limitedMap();
- let calls=0;bot.runAutoModeration=async()=>{calls++;return true;};bot.safeSay=async()=>{};
- for(const message of ['!iq плохой текст','когда плохой текст'])await bot.onMessage('#streamer',{username:'viewer',badges:{}},message,false);
+ let calls=0;
+ const handle=createMessageHandler({moderate:async()=>{calls++;return true;},send:async()=>{},dispatch:async()=>{}});
+ for(const message of ['!iq плохой текст','когда плохой текст'])await handle('#streamer',{username:'viewer',badges:{}},message,false);
  assert.equal(calls,2);
- await bot.onMessage('#streamer',{username:'vip',badges:{vip:'1'}},'ПРИВЕТ',false);
+ await handle('#streamer',{username:'vip',badges:{vip:'1'}},'ПРИВЕТ',false);
  assert.equal(calls,2);
 });
 test('ordinary user cannot invoke privileged commands',async()=>{
- const bot=Object.create(TwitchBot.prototype);bot.commandTimes=require('../src/utils/security').limitedMap();bot.runAutoModeration=async()=>false;
- let invoked=false;bot.userHandlers={addpoints:async()=>{invoked=true;}};
- await bot.onMessage('#streamer',{username:'viewer',badges:{}},'!+очки @viewer 100',false);
+ let invoked=false;
+ const dispatch=createDispatcher({moderatorHandlers:{},userHandlers:{addpoints:async()=>{invoked=true;}}});
+ const handle=createMessageHandler({moderate:async()=>false,send:async()=>{},dispatch});
+ await handle('#streamer',{username:'viewer',badges:{}},'!+очки @viewer 100',false);
  assert.equal(invoked,false);
 });
 test('outgoing commands cannot execute slash commands',async()=>{
- const bot=Object.create(TwitchBot.prototype);bot.outgoingTimes=[];const sent=[];bot.client={say:async(c,m)=>sent.push(m)};
- await bot.safeSay('#streamer','/ban victim');await bot.safeSay('#streamer','.timeout victim');
- await bot.safeSay('#streamer','текст\nвторая строка');
+ const sent=[];const send=createSender({client:{say:async(c,m)=>sent.push(m)}});
+ await send('#streamer','/ban victim');await send('#streamer','.timeout victim');
+ await send('#streamer','текст\nвторая строка');
  assert.deepEqual(sent,['текст вторая строка']);
 });
 test('API authenticates, validates body and executes third warning timeout',async()=>{
@@ -116,4 +119,68 @@ test('token validation rejects mismatched owner and missing scopes without loggi
   global.fetch=async()=>({ok:true,json:async()=>({client_id:'client',login:'testbot',scopes:[]})});
   await assert.rejects(api.validateToken(),/chat:read/);
  }finally{global.fetch=previous;}
+});
+test('role policy covers moderator and owner-only commands',async()=>{
+ const {getPermissions}=require('../src/chat/permissions');
+ const cases=[
+  [{badges:{}},false,false],
+  [{badges:{vip:'1'}},false,false],
+  [{mod:true,badges:{}},true,false],
+  [{badges:{broadcaster:'1'}},true,true]
+ ];
+ for(const [tags,mayModerate,mayOwn] of cases){
+  let now=100000;const invoked=[];
+  const dispatch=createDispatcher({clock:()=>now,moderatorHandlers:{ban:async()=>invoked.push('ban')},userHandlers:{addpoints:async()=>invoked.push('points'),test:async()=>invoked.push('test')}});
+  for(const message of ['!бан @target','!+очки @target 1','!тест текст']){
+   await dispatch({channel:'#streamer',tags:{...tags,username:'roleuser'},message,permissions:getPermissions(tags)});now+=3001;
+  }
+  assert.deepEqual(invoked,[...(mayModerate?['ban','points']:[]),...(mayOwn?['test']:[])]);
+ }
+});
+test('dispatcher preserves arguments, aliases and special cooldowns',async()=>{
+ const {getPermissions}=require('../src/chat/permissions');
+ let now=100000;const calls=[];
+ const dispatch=createDispatcher({clock:()=>now,moderatorHandlers:{},userHandlers:{roulette:async(...args)=>calls.push(args)}});
+ const ctx={channel:'#streamer',tags:{username:'cooluser'},permissions:getPermissions({})};
+ await dispatch({...ctx,message:'!РУЛЕТКА   аргумент'});
+ now+=3001;await dispatch({...ctx,message:'!рулетка'});
+ assert.equal(calls.length,1);assert.deepEqual(calls[0].slice(0,3),['#streamer',['аргумент'],'cooluser']);
+ now+=300000;await dispatch({...ctx,message:'!рулетка'});
+ assert.equal(calls.length,2);
+});
+test('link deletion and ignored events never dispatch commands',async()=>{
+ const events=[];const handle=createMessageHandler({send:async()=>events.push('send'),moderate:async()=>events.push('moderate'),dispatch:async()=>events.push('dispatch'),twitchApi:{deleteMessage:async()=>events.push('delete')}});
+ await handle('#streamer',{username:'viewer',id:'message'},'!тест example.com',false);
+ assert.deepEqual(events,['delete','send']);
+ await handle('#streamer',{username:'viewer'},'!пинг',true);
+ await handle('#streamer',null,'!пинг',false);
+ assert.deepEqual(events,['delete','send']);
+});
+test('sender limits output and recovers after its rate window',async()=>{
+ let now=100000;const sent=[];
+ const send=createSender({clock:()=>now,client:{say:async(channel,text)=>{sent.push(text);return {id:'message'};}}});
+ assert.deepEqual(await send('#streamer','😀'.repeat(500),true),{id:'message'});
+ assert.equal(Array.from(sent[0]).length,450);
+ for(let i=0;i<20;i++)await send('#streamer','ответ');
+ assert.equal(sent.length,18);
+ now+=30000;await send('#streamer','новое окно');assert.equal(sent.length,19);
+});
+test('runtime wires modules to the client without starting a connection on import',async()=>{
+ const {EventEmitter}=require('node:events');
+ const {TwitchBot}=require('../src/bot');
+ const client=new EventEmitter();const sent=[];client.say=async(channel,text)=>sent.push(text);
+ const bot=new TwitchBot({client});
+ assert.equal(client.listenerCount('message'),1);
+ await bot.handleMessage('#streamer',{username:'streamer',badges:{broadcaster:'1'}},'!тест проверка',false);
+ assert.deepEqual(sent,['проверка']);
+ bot.stopping=true;
+ await bot.handleMessage('#streamer',{username:'streamer',badges:{broadcaster:'1'}},'!тест ещё',false);
+ assert.equal(sent.length,1);
+});
+test('extracted automoderation applies punishment before deleting the offending message',async()=>{
+ const {createAutoModeration}=require('../src/chat/automoderation');
+ const events=[];
+ const moderate=createAutoModeration({client:{},send:async()=>events.push('send'),moderation:{hasForbiddenWords:()=>true,getTimeoutDuration:()=>600,handleTimeout:async()=>events.push('timeout')},twitchApi:{deleteMessage:async()=>events.push('delete')}});
+ assert.equal(await moderate('#streamer',{id:'message'},'нарушение','viewer'),true);
+ assert.deepEqual(events,['timeout','delete']);
 });
