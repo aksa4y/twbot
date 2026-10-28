@@ -2,3 +2,5 @@ Based on Cluelesstech98/twitch_bot, upstream commit b1e1406e854d722898a4b5e6328f
 https://github.com/Cluelesstech98/twitch_bot
 Upstream docs/README.md declares MIT licensing; no standalone LICENSE file was present in that snapshot.
 Original author attribution is retained here. Runtime promotion has been removed.
+
+Panel display typeface: subset of DejaVu Sans Bold. Font license and notices: src/panel/FONT-LICENSE.txt.

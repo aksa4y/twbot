@@ -441,7 +441,7 @@ test('panel serves public assets but protects status, logs and settings',async()
  try {
   const page=await fetch(base+'/panel');const html=await page.text();assert.equal(page.status,200);assert.match(html,/TWBot/);assert.equal(html.includes(process.env.API_KEY),false);
   assert.match(page.headers.get('content-security-policy'),/frame-ancestors 'none'/);
-  for(const asset of ['app.js','styles.css'])assert.equal((await fetch(base+'/panel/'+asset)).status,200);
+  for(const asset of ['app.js','styles.css','display.woff'])assert.equal((await fetch(base+'/panel/'+asset)).status,200);
   for(const route of ['/status','/logs/actions','/logs/observations'])assert.equal((await fetch(base+route)).status,401);
   const headers={'x-api-key':process.env.API_KEY};
   const status=await (await fetch(base+'/status',{headers})).json();assert.ok(status.summary);assert.equal(JSON.stringify(status).includes(process.env.API_KEY),false);

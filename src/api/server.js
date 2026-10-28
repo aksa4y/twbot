@@ -24,7 +24,7 @@ function createApp(client, controls = {}) {
  const panel = path.join(__dirname,'../panel');
  app.get('/panel',(req,res)=>res.sendFile(path.join(panel,'index.html')));
  app.get('/panel/:asset',(req,res,next)=>{
-  if (!['app.js','styles.css'].includes(req.params.asset)) return next();
+  if (!['app.js','styles.css','display.woff'].includes(req.params.asset)) return next();
   res.sendFile(path.join(panel,req.params.asset));
  });
  const limits=limitedMap(1000,60000);
