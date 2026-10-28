@@ -8,6 +8,8 @@ function getAutoModerationMode() {
 }
 function validateConfig() {
  getAutoModerationMode();
+ if (!['confidential','public'].includes(process.env.OAUTH_CLIENT_TYPE || 'confidential')) throw new Error('Некорректный OAUTH_CLIENT_TYPE');
+ if (process.env.REFRESH_TOKEN && process.env.OAUTH_CLIENT_TYPE !== 'public' && !process.env.CLIENT_SECRET) throw new Error('Для REFRESH_TOKEN заполните CLIENT_SECRET');
  for (const key of ['ACCESS_TOKEN','CLIENT_ID','BOT_USERNAME','CHANNEL_NAME']) {
   if (!process.env[key] || /EXAMPLE|YOUR_|ваш/i.test(process.env[key])) throw new Error(`Заполните ${key} в config/.env`);
  }

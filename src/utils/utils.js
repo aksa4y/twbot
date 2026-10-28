@@ -2,15 +2,13 @@ const axios = require('../services/http');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../config/.env') });
 
-const CLIENT_ID = process.env.CLIENT_ID;
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 
 async function axiosGetWithTimeout(url, timeout = 5000) {
     try {
         const response = await axios.get(url, {
             headers: {
-                'Client-ID': CLIENT_ID,
-                'Authorization': `Bearer ${ACCESS_TOKEN}`,
+                'Client-ID': process.env.CLIENT_ID,
+                'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`,
             },
             timeout: timeout,
         });

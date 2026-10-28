@@ -21,8 +21,6 @@ const cooldowns = createCooldownStore();
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../config/.env') });
 
-const CLIENT_ID = process.env.CLIENT_ID;
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const CHANNEL_NAME = process.env.CHANNEL_NAME;
 const BACKUP_CHANNEL_CREATION_DATE = process.env.BACKUP_CHANNEL_CREATION_DATE;
 
@@ -96,8 +94,8 @@ async function handleFollowage(tags, isBroadcaster) {
             `https://api.twitch.tv/helix/users?login=${CHANNEL_NAME}`,
             {
                 headers: {
-                    'Client-ID': CLIENT_ID,
-                    Authorization: `Bearer ${ACCESS_TOKEN}`,
+                    'Client-ID': process.env.CLIENT_ID,
+                    Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
                 },
             }
         );
@@ -108,8 +106,8 @@ async function handleFollowage(tags, isBroadcaster) {
             `https://api.twitch.tv/helix/users?login=${username}`,
             {
                 headers: {
-                    'Client-ID': CLIENT_ID,
-                    Authorization: `Bearer ${ACCESS_TOKEN}`,
+                    'Client-ID': process.env.CLIENT_ID,
+                    Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
                 },
             }
         );
@@ -120,8 +118,8 @@ async function handleFollowage(tags, isBroadcaster) {
             `https://api.twitch.tv/helix/channels/followers?user_id=${userId}&broadcaster_id=${broadcasterId}`,
             {
                 headers: {
-                    'Client-ID': CLIENT_ID,
-                    Authorization: `Bearer ${ACCESS_TOKEN}`,
+                    'Client-ID': process.env.CLIENT_ID,
+                    Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
                 },
             }
         );
@@ -143,8 +141,8 @@ async function handleCategories(channelName) {
             `https://api.twitch.tv/helix/streams?user_login=${channelName}`,
             {
                 headers: {
-                    'Client-ID': CLIENT_ID,
-                    Authorization: `Bearer ${ACCESS_TOKEN}`,
+                    'Client-ID': process.env.CLIENT_ID,
+                    Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
                 },
             }
         );

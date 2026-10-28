@@ -1,4 +1,5 @@
 const tmi = require('tmi.js');
+const {tokenManager} = require('../services/token-manager');
 const {getAutoModerationMode} = require('../config');
 const twitchApi = require('../services/api');
 const interactive = require('../commands/interactive');
@@ -29,7 +30,7 @@ class TwitchBot {
             },
             identity: {
                 username: process.env.BOT_USERNAME,
-                password: `oauth:${process.env.ACCESS_TOKEN}`,
+                password: async () => {await tokenManager.check();this.chatAccessToken=tokenManager.getAccessToken();return `oauth:${this.chatAccessToken}`;},
                 clientId: process.env.CLIENT_ID
             },
             channels: [process.env.CHANNEL_NAME]
@@ -79,21 +80,45 @@ class TwitchBot {
         });
         this.client.on('disconnected', reason => {
             console.warn(`⚠️ Бот отключен: ${reason}`);
+            if(this.chatStarted && /authentication failed|Login unsuccessful|Error logging in/i.test(String(reason))) this.recoverChatAuth().catch(error=>this.handleAuthError(error));
 
         });
-        this.client.on('login_failure', () => {
-            console.error('❌ Ошибка аутентификации. Проверьте ACCESS_TOKEN в .env');
-            process.exit(1);
-        });
+        this.client.on('login_failure', () => this.recoverChatAuth().catch(error=>this.handleAuthError(error)));
+    }
+
+    handleAuthError(error) {
+        console.error(error.authError ? error.message : 'Не удалось восстановить авторизацию Twitch.');
+        if(error.fatal) this.shutdown(1);
+        else if(this.chatStarted && this.client.readyState?.() !== 'OPEN' && !this.stopping && !this.authRetryTimer) this.authRetryTimer=setTimeout(()=>{this.authRetryTimer=null;this.recoverChatAuth().catch(error=>this.handleAuthError(error));},60000);
+    }
+
+    async recoverChatAuth() {
+        if(this.stopping)return;
+        if(this.authRecovery)return this.authRecovery;
+        this.authRecovery=(async()=>{
+            await tokenManager.refresh(this.chatAccessToken || tokenManager.getAccessToken());
+            if(this.stopping)return;
+            this.client.reconnect=true;
+            await this.client.connect();
+            clearTimeout(this.authRetryTimer);this.authRetryTimer=null;
+        })();
+        try {await this.authRecovery;}
+        finally{this.authRecovery=null;}
     }
 
     async connect() {
         try {
             await require('../services/database').ready;
             console.log(`Режим автомодерации: ${this.autoModerationMode}`);
-            await twitchApi.validateToken();
-            this.validationTimer = setInterval(() => twitchApi.validateToken().catch(() => this.shutdown(1)), 60 * 60 * 1000);
-            await this.client.connect();
+            await tokenManager.check(true);
+            this.authUnsubscribe=tokenManager.onFatal(error=>this.handleAuthError(error));
+            this.validationTimer = setInterval(() => tokenManager.check().catch(error=>this.handleAuthError(error)),60000);
+            try {await this.client.connect();}
+            catch(error){
+                if(!/authentication failed|Login unsuccessful|Error logging in/i.test(String(error))) throw error;
+                await this.recoverChatAuth();
+            }
+            this.chatStarted=true;
             console.log('✅ Бот уже на Twitch');
             this.apiServer = startApiServer(this.client, {getStatus:() => this.getStatus(), setMode:mode => this.setMode(mode)});
             const refresh = async () => {
@@ -112,7 +137,9 @@ class TwitchBot {
     async shutdown(code = 0) {
         if (this.stopping) return;
         this.stopping = true;
+        this.authUnsubscribe?.();
         clearInterval(this.validationTimer);
+        clearTimeout(this.authRetryTimer);
         clearInterval(this.streamTimer);
         const force = setTimeout(() => process.exit(code || 1), 5000);
         force.unref();

@@ -7,3 +7,5 @@ data/*
 .runtime/
 *.log
 coverage/
+
+config/oauth-tokens.json*

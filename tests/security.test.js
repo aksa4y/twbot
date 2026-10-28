@@ -474,3 +474,16 @@ test('a decision retains its evaluated mode if the panel switches mode while log
  await apply({channel:'#streamer',tags:{username:'viewer'},message:'spam',rule:'spam',actions:[{type:'warning',text:'warning'}],evaluatedMode:'observe'});
  assert.deepEqual(effects,[]);
 });
+test('chat credential provider reads latest token and auth recovery reconnects once',async()=>{
+ const {EventEmitter}=require('node:events');const {TwitchBot}=require('../src/bot');
+ const {tokenManager}=require('../src/services/token-manager');
+ const previousCheck=tokenManager.check,previousRefresh=tokenManager.refresh,previousAccess=process.env.ACCESS_TOKEN;
+ let checked=0,refreshed=0,connected=0;
+ tokenManager.check=async()=>{checked++;};tokenManager.refresh=async()=>{refreshed++;process.env.ACCESS_TOKEN='fresh-chat-token';};
+ const client=new EventEmitter();client.connect=async()=>{connected++;};
+ try {
+  const bot=new TwitchBot({client});process.env.ACCESS_TOKEN='first-chat-token';assert.equal(await bot.config.identity.password(),'oauth:first-chat-token');
+  await Promise.all([bot.recoverChatAuth(),bot.recoverChatAuth()]);assert.equal(refreshed,1);assert.equal(connected,1);assert.equal(client.reconnect,true);
+  assert.equal(await bot.config.identity.password(),'oauth:fresh-chat-token');assert.equal(checked,2);
+ }finally{tokenManager.check=previousCheck;tokenManager.refresh=previousRefresh;if(previousAccess===undefined)delete process.env.ACCESS_TOKEN;else process.env.ACCESS_TOKEN=previousAccess;}
+});
